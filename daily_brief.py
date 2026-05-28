@@ -163,11 +163,29 @@ def get_calendar_events():
             dt = datetime.datetime.fromisoformat(start)
             time_str = "ทั้งวัน"
 
+        # End time
+        if "T" in end:
+            end_dt = datetime.datetime.fromisoformat(end)
+            end_str = end_dt.strftime("%H:%M")
+        else:
+            end_str = ""
+
+        # Detect online vs outdoor
+        location = e.get("location", "")
+        notes = e.get("description", "")
+        is_online = any(kw in (location + notes).lower() for kw in [
+            "meet.google", "zoom", "teams", "webex", "online", "virtual",
+            "google meet", "http", "discord"
+        ])
+
         event_info = {
-            "title":    e.get("summary", "(ไม่มีชื่อ)"),
-            "time":     time_str,
-            "location": e.get("location", ""),
-            "is_allday": "T" not in start,
+            "title":       e.get("summary", "(ไม่มีชื่อ)"),
+            "time":        time_str,
+            "end_time":    end_str,
+            "location":    location,
+            "description": notes[:300] if notes else "",
+            "is_online":   is_online,
+            "is_allday":   "T" not in start,
         }
 
         if dt.date() == today_start.date():
@@ -202,12 +220,24 @@ def generate_brief(weather_data, calendar_data):
 --- ปฏิทินพรุ่งนี้ ---
 {json.dumps(calendar_data["tomorrow"], ensure_ascii=False, indent=2)}
 
+ข้อมูลแต่ละ event มี fields ดังนี้:
+- title: ชื่อ event
+- time / end_time: เวลาเริ่ม-จบ
+- location: สถานที่ (ถ้ามี)
+- description: รายละเอียดเพิ่มเติมจาก calendar
+- is_online: true = ประชุมออนไลน์, false = ต้องออกไปข้างนอกหรือ unknown
+
+ใช้ข้อมูลเหล่านี้วิเคราะห์แต่ละ event ว่า:
+- ต้องออกไปข้างนอกไหม? (ถ้าต้องออกไปและฝนจะตก → เตือน)
+- เป็นนัดสำคัญหรือ deep work? (แนะนำ prep)
+- ใช้เวลานานแค่ไหน? (วางแผน flow ของวัน)
+
 กรุณาสร้าง Daily Brief ในรูปแบบนี้:
 
 **🌅 [วันที่] — Daily Brief**
 
 **⚡ ONE SENTENCE SUMMARY**
-[ประโยคเดียวที่สรุปวันนี้อย่างฉลาด เช่น "วันนี้ค่อนข้างแน่น ช่วงเช้าเหมาะกับ deep work และควรรีบออกก่อน 8:10 เพราะฝนกับรถติด"]
+[ประโยคเดียวที่ฉลาด อ้างอิง event จริงและสภาพอากาศจริง เช่น "นัด 09:00 ต้องออกไปข้างนอก — รีบออกก่อน 08:30 เพราะฝนจะตก 94% ช่วงสาย"]
 
 **🌤️ สภาพอากาศ**
 - วันนี้: [อุณหภูมิ สภาพ โอกาสฝน]
@@ -216,15 +246,15 @@ def generate_brief(weather_data, calendar_data):
 > ⚠️ [คำเตือนถ้าฝนจะตกช่วงเฉพาะ หรือ skip ถ้าไม่มี]
 
 **📅 Tasks & Events — วันนี้**
-[รายการ events ของวันนี้ พร้อมเวลา]
+[รายการ events พร้อมเวลา และ context สั้นๆ เช่น "📍 ต้องออกไป" หรือ "💻 Online"]
 [ถ้าไม่มี event ให้บอกว่า "ไม่มีนัดหมาย — วันว่าง 🎯"]
 
 **📅 Tasks & Events — พรุ่งนี้**
-[รายการ events ของพรุ่งนี้]
+[รายการ events พร้อม context]
 [ถ้าไม่มี event ให้บอกว่า "ยังไม่มีนัดหมาย"]
 
 **💡 Tips**
-[1-2 ข้อแนะนำสั้นๆ ที่ฉลาดและเป็นประโยชน์จริงๆ จากข้อมูลที่มี]
+[1-2 ข้อที่เฉพาะเจาะจงกับ event จริง ไม่ใช่คำแนะนำทั่วไป เช่น "นัด 'ทดลองใช้ Claude' พรุ่งนี้ — เตรียม use case ไว้ก่อนนอน" หรือ "ฝน 94% พรุ่งนี้เช้า ถ้าต้องขับรถควรออกก่อน 08:15"]
 
 ใช้ภาษาไทยตลอด กระชับ ฉลาด ไม่เยิ่นเย้อ
 """
@@ -240,14 +270,32 @@ def generate_brief(weather_data, calendar_data):
 # ─────────────────────────────────────────────
 # DISCORD
 # ─────────────────────────────────────────────
-def send_to_discord(content: str):
-    # Discord has 2000 char limit per message — split if needed
-    chunks = [content[i:i+1990] for i in range(0, len(content), 1990)]
-    for chunk in chunks:
-        payload = {"content": chunk}
-        r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        r.raise_for_status()
-    print("✅ Sent to Discord successfully.")
+def send_to_discord(brief_text: str, weather_data: list):
+    """Send as Discord Embed with color bar based on rain probability."""
+
+    # Pick color from today's rain probability
+    rain_today = weather_data[0]["rain_probability"] if weather_data else 0
+    if rain_today >= 70:
+        color = 0x5865F2   # indigo — stormy
+    elif rain_today >= 40:
+        color = 0x57F287   # green — cloudy
+    else:
+        color = 0xFEE75C   # yellow — sunny
+
+    # Split brief into sections to fit Discord embed description (4096 char limit)
+    # Use full text as description — Discord renders markdown inside embeds
+    description = brief_text[:4000]  # safe limit
+
+    payload = {
+        "embeds": [{
+            "description": description,
+            "color": color,
+        }]
+    }
+
+    r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+    r.raise_for_status()
+    print(f"✅ Sent to Discord (color: #{color:06X}, rain: {rain_today}%)")
 
 
 # ─────────────────────────────────────────────
@@ -268,7 +316,7 @@ def main():
     brief = generate_brief(weather, calendar)
 
     print("📨 Sending to Discord...")
-    send_to_discord(brief)
+    send_to_discord(brief, weather)
 
     print("Done!")
     print("\n--- PREVIEW ---\n")
