@@ -138,7 +138,7 @@ def get_calendar_events():
 
     bkk_tz = datetime.timezone(datetime.timedelta(hours=7))
     today_start = datetime.datetime.now(bkk_tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    two_days_end = today_start + datetime.timedelta(days=2)
+    two_days_end = today_start + datetime.timedelta(days=3)  # +3 เพื่อ cover all-day events ที่ Google เก็บ end เป็นวันถัดไป
 
     events_result = service.events().list(
         calendarId="primary",
@@ -156,11 +156,16 @@ def get_calendar_events():
         start = e["start"].get("dateTime", e["start"].get("date"))
         end   = e["end"].get("dateTime",   e["end"].get("date"))
 
-        if "T" in start:
+        is_allday = "T" not in start
+        if not is_allday:
             dt = datetime.datetime.fromisoformat(start)
-            time_str = dt.strftime("%H:%M")
+            # Normalize to BKK timezone for comparison
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=bkk_tz)
+            time_str = dt.astimezone(bkk_tz).strftime("%H:%M")
         else:
-            dt = datetime.datetime.fromisoformat(start)
+            # All-day event: start is "YYYY-MM-DD" — parse as date only
+            dt = datetime.datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=bkk_tz)
             time_str = "ทั้งวัน"
 
         # End time
@@ -185,13 +190,15 @@ def get_calendar_events():
             "location":    location,
             "description": notes[:300] if notes else "",
             "is_online":   is_online,
-            "is_allday":   "T" not in start,
+            "is_allday":   is_allday,
         }
 
-        if dt.date() == today_start.date():
+        event_date = dt.astimezone(bkk_tz).date()
+        if event_date == today_start.date():
             events_by_day["today"].append(event_info)
-        else:
+        elif event_date == (today_start + datetime.timedelta(days=1)).date():
             events_by_day["tomorrow"].append(event_info)
+        # else: beyond tomorrow — skip
 
     return events_by_day
 
